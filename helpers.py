@@ -47,7 +47,7 @@ def poseRt(R, t):
 
 # pose
 def fundamentalToRt(F):
-  W = np.mat([[0,-1,0],[1,0,0],[0,0,1]],dtype=float)
+  W = np.array([[0,-1,0],[1,0,0],[0,0,1]], dtype=float)
   U,d,Vt = np.linalg.svd(F)
   if np.linalg.det(U) < 0:
     U *= -1.0
@@ -116,4 +116,3 @@ class EssentialMatrixTransform(object):
 
     return np.abs(dst_F_src) / np.sqrt(F_src[0] ** 2 + F_src[1] ** 2
                                        + Ft_dst[0] ** 2 + Ft_dst[1] ** 2)
-
