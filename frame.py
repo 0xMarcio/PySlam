@@ -2,12 +2,10 @@ import os
 import cv2
 import numpy as np
 from scipy.spatial import cKDTree
-from constants import RANSAC_RESIDUAL_THRES, RANSAC_MAX_TRIALS
 
 np.set_printoptions(suppress=True)
 
-from skimage.measure import ransac
-from helpers import add_ones, poseRt, fundamentalToRt, normalize, EssentialMatrixTransform, myjet
+from helpers import normalize, myjet
 
 
 def extractFeatures(img):
@@ -35,8 +33,8 @@ def match_frames(f1, f2):
 
     for m, n in matches:
         if m.distance < 0.75 * n.distance:
-            p1 = f1.kps[m.queryIdx]
-            p2 = f2.kps[m.trainIdx]
+            p1 = f1.kpus[m.queryIdx]
+            p2 = f2.kpus[m.trainIdx]
 
             # be within orb distance 32
             if m.distance < 32:
@@ -53,19 +51,16 @@ def match_frames(f1, f2):
     assert (len(set(idx1)) == len(idx1))
     assert (len(set(idx2)) == len(idx2))
 
-    assert len(ret) >= 8
-    ret = np.array(ret)
-    idx1 = np.array(idx1)
-    idx2 = np.array(idx2)
+    if len(ret) == 0:
+        return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32), np.empty((0, 2), dtype=np.float64), np.empty((0, 2), dtype=np.float64)
 
-    # fit matrix
-    model, inliers = ransac((ret[:, 0], ret[:, 1]),
-                            EssentialMatrixTransform,
-                            min_samples=8,
-                            residual_threshold=RANSAC_RESIDUAL_THRES,
-                            max_trials=RANSAC_MAX_TRIALS)
-    print("Matches:  %d -> %d -> %d -> %d" % (len(f1.des), len(matches), len(inliers), sum(inliers)))
-    return idx1[inliers], idx2[inliers], fundamentalToRt(model.params)
+    ret = np.array(ret, dtype=np.float64)
+    idx1 = np.array(idx1, dtype=np.int32)
+    idx2 = np.array(idx2, dtype=np.int32)
+
+    print("Matches:  %d -> %d -> %d" % (len(f1.des), len(matches), len(idx1)))
+
+    return idx1, idx2, ret[:, 0], ret[:, 1]
 
 
 class Frame(object):

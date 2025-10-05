@@ -103,6 +103,9 @@ class Map(object):
   # *** optimizer ***
   
   def optimize(self, local_window=LOCAL_WINDOW, fix_points=False, verbose=False, rounds=50):
+    if len(self.frames) < 2 or len(self.points) < 10:
+      return 0.0
+
     err = optimize(self.frames, self.points, local_window, fix_points, verbose, rounds)
 
     # prune points
@@ -127,4 +130,3 @@ class Map(object):
     print("Culled:   %d points" % (culled_pt_count))
 
     return err
-

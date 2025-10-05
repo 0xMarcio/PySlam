@@ -48,7 +48,7 @@ Run the sample clip with the freshly built libraries:
 ```bash
 cd ../../
 DYLD_FALLBACK_LIBRARY_PATH="$PWD/lib/macosx:$DYLD_FALLBACK_LIBRARY_PATH" \
-HEADLESS=1 /opt/homebrew/bin/python3 slam.py videos/test_road.mp4
+HEADLESS=1 /opt/homebrew/bin/python3 slam.py videos/road.mp4
 ```
 
 If you see frame-by-frame SLAM logs, Pangolin and g2o loaded correctly.

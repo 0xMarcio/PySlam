@@ -12,7 +12,7 @@ from frame import Frame, match_frames
 import numpy as np
 # import g2o
 from pointmap import Map, Point
-from helpers import triangulate, add_ones
+from helpers import triangulate, poseRt
 
 np.set_printoptions(suppress=True)
 
@@ -24,6 +24,13 @@ class SLAM(object):
     # params
     self.W, self.H = W, H
     self.K = K
+    self.min_pnp_points = 6
+
+  def _drop_last_frame(self):
+    if not self.mapp.frames:
+      return
+    self.mapp.frames.pop()
+    self.mapp.max_frame = max(0, self.mapp.max_frame - 1)
 
   def process_frame(self, img, pose=None, verts=None):
     start_time = time.time()
@@ -36,7 +43,84 @@ class SLAM(object):
     f1 = self.mapp.frames[-1]
     f2 = self.mapp.frames[-2]
 
-    idx1, idx2, Rt = match_frames(f1, f2)
+    idx1, idx2, pts1_px, pts2_px = match_frames(f1, f2)
+    if len(idx1) < 8:
+      print("Matches:  insufficient, dropping frame")
+      self._drop_last_frame()
+      return
+
+    pts1 = np.asarray(pts1_px, dtype=np.float64)
+    pts2 = np.asarray(pts2_px, dtype=np.float64)
+    idx1 = np.asarray(idx1, dtype=np.int32)
+    idx2 = np.asarray(idx2, dtype=np.int32)
+
+    known_mask = np.array([f2.pts[idx] is not None for idx in idx2])
+    known_indices = np.nonzero(known_mask)[0]
+    object_points = np.array([f2.pts[idx2[i]].pt for i in known_indices], dtype=np.float64) if len(known_indices) else np.empty((0, 3), dtype=np.float64)
+    image_points = pts1[known_indices] if len(known_indices) else np.empty((0, 2), dtype=np.float64)
+
+    pose_estimated = False
+    good_mask = np.ones(len(idx1), dtype=bool)
+
+    if len(object_points) >= self.min_pnp_points:
+      success, rvec, tvec, inliers = cv2.solvePnPRansac(
+        object_points,
+        image_points,
+        self.K,
+        None,
+        iterationsCount=100,
+        reprojectionError=3.0,
+        confidence=0.999,
+        flags=cv2.SOLVEPNP_ITERATIVE
+      )
+      if success and inliers is not None and len(inliers) >= self.min_pnp_points:
+        R, _ = cv2.Rodrigues(rvec)
+        t = tvec.reshape(3)
+        f1.pose = poseRt(R, t)
+        pose_estimated = True
+
+        inlier_mask = np.zeros(len(object_points), dtype=bool)
+        inlier_mask[inliers.ravel()] = True
+        for local_idx, is_inlier in zip(known_indices, inlier_mask):
+          if not is_inlier:
+            good_mask[local_idx] = False
+
+    if not pose_estimated:
+      E, e_mask = cv2.findEssentialMat(pts1, pts2, self.K, method=cv2.RANSAC, prob=0.999, threshold=1.0)
+      if E is None:
+        print("Essential matrix estimation failed; dropping frame")
+        self._drop_last_frame()
+        return
+      _, R_rel, t_rel, pose_mask = cv2.recoverPose(E, pts1, pts2, self.K)
+      mask = pose_mask.ravel().astype(bool)
+      if e_mask is not None:
+        mask &= e_mask.ravel().astype(bool)
+      if mask.sum() < 8:
+        print("Pose recovery failed; dropping frame")
+        self._drop_last_frame()
+        return
+      good_mask &= mask
+      pts1 = pts1[good_mask]
+      pts2 = pts2[good_mask]
+      idx1 = idx1[good_mask]
+      idx2 = idx2[good_mask]
+
+      R_prev = f2.pose[:3, :3]
+      t_prev = f2.pose[:3, 3]
+      t_rel = t_rel.reshape(3)
+      R_curr = R_rel @ R_prev
+      t_curr = R_rel @ t_prev + t_rel
+      f1.pose = poseRt(R_curr, t_curr)
+    else:
+      pts1 = pts1[good_mask]
+      pts2 = pts2[good_mask]
+      idx1 = idx1[good_mask]
+      idx2 = idx2[good_mask]
+
+    if len(idx1) == 0:
+      print("Matches: 0 after filtering; dropping frame")
+      self._drop_last_frame()
+      return
 
     # add new observations if the point is already observed in the previous frame
     # TODO: consider tradeoff doing this before/after search by projection
@@ -44,20 +128,10 @@ class SLAM(object):
       if f2.pts[idx] is not None and f1.pts[idx1[i]] is None:
         f2.pts[idx].add_observation(f1, idx1[i])
 
-    if frame.id < 5 or True:
-      # get initial positions from fundamental matrix
-      f1.pose = np.dot(Rt, f2.pose)
-    else:
-      # kinematic model (not used)
-      velocity = np.dot(f2.pose, np.linalg.inv(self.mapp.frames[-3].pose))
-      f1.pose = np.dot(velocity, f2.pose)
-
     # pose optimization
     if pose is None:
-      #print(f1.pose)
-      pose_opt = self.mapp.optimize(local_window=1, fix_points=True)
+      pose_opt = self.mapp.optimize(local_window=5, fix_points=True)
       print("Pose:     %f" % pose_opt)
-      #print(f1.pose)
     else:
       # have ground truth for pose
       f1.pose = pose
@@ -69,10 +143,14 @@ class SLAM(object):
       # project *all* the map points into the current frame
       map_points = np.array([p.homogeneous() for p in self.mapp.points])
       projs = np.dot(np.dot(self.K, f1.pose[:3]), map_points.T).T
+      depths = projs[:, 2]
+      valid_depth = depths > 0
+      projs_2d = projs[:, :2] / depths[:, None]
 
       # only the points that fit in the frame
-      good_pts = (projs[:, 0] > 0) & (projs[:, 0] < self.W) & \
-                 (projs[:, 1] > 0) & (projs[:, 1] < self.H)
+      good_pts = valid_depth & \
+                 (projs_2d[:, 0] >= 0) & (projs_2d[:, 0] < self.W) & \
+                 (projs_2d[:, 1] >= 0) & (projs_2d[:, 1] < self.H)
 
       for i, p in enumerate(self.mapp.points):
         if not good_pts[i]:
@@ -82,7 +160,7 @@ class SLAM(object):
           # we already matched this map point to this frame
           # TODO: understand this better
           continue
-        for m_idx in f1.kd.query_ball_point(projs[i], 2):
+        for m_idx in f1.kd.query_ball_point(projs_2d[i], 2):
           # if point unmatched
           if f1.pts[m_idx] is None:
             b_dist = p.orb_distance(f1.des[m_idx])
@@ -96,7 +174,7 @@ class SLAM(object):
     good_pts4d = np.array([f1.pts[i] is None for i in idx1])
 
     # do triangulation in global frame
-    pts4d = triangulate(f1.pose, f2.pose, f1.kps[idx1], f2.kps[idx2])
+    pts4d = triangulate(self.K, f1.pose, f2.pose, f1.kpus[idx1], f2.kpus[idx2])
     good_pts4d &= np.abs(pts4d[:, 3]) != 0
     pts4d /= pts4d[:, 3:]       # homogeneous 3-D coords
 
@@ -147,8 +225,8 @@ class SLAM(object):
     print("Adding:   %d new points, %d search by projection" % (new_pts_count, sbp_pts_count))
 
     # optimize the map
-    if frame.id >= 4 and frame.id%5 == 0:
-      err = self.mapp.optimize() #verbose=True)
+    if frame.id >= 4 and frame.id % 5 == 0:
+      err = self.mapp.optimize(local_window=10, fix_points=False)
       print("Optimize: %f units of error" % err)
 
     print("Map:      %d points, %d frames" % (len(self.mapp.points), len(self.mapp.frames)))
@@ -208,22 +286,22 @@ if __name__ == "__main__":
     # add scale param?
     gt_pose[:, :3, 3] *= 50
 
+  debug_exceptions = os.getenv("PYSLAM_DEBUG") == "1"
+
   i = 0
   while cap.isOpened():
     ret, frame = cap.read()
-    try:
-      frame = cv2.resize(frame, (W, H))
-    except Exception as e:
-      print(f'Cought exception: {e}')
+    if not ret:
+      break
+    frame = cv2.resize(frame, (W, H))
 
     print("\n*** frame %d/%d ***" % (i, CNT))
-    if ret == True:
-      try:
-        slam.process_frame(frame, None if gt_pose is None else np.linalg.inv(gt_pose[i]))
-      except Exception as e:
-        print(f'Cought exception: {e}')
-    else:
-      break
+    try:
+      slam.process_frame(frame, None if gt_pose is None else np.linalg.inv(gt_pose[i]))
+    except Exception as e:
+      if debug_exceptions:
+        raise
+      print(f'Caught exception: {e}')
 
     disp3d.paint(slam.mapp)
 
@@ -248,5 +326,11 @@ if __name__ == "__main__":
       cv2.destroyAllWindows()
       break
 
+  cap.release()
+  cv2.destroyAllWindows()
 
+  if disp2d is not None:
+    disp2d.close()
 
+  if disp3d is not None:
+    disp3d.close()

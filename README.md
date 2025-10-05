@@ -14,10 +14,10 @@ PySlam is a Python port of geohot's twitchslam with a refreshed Pangolin viewer 
    ```bash
    /opt/homebrew/bin/python3 -m pip install --break-system-packages -r requirements.txt
    ```
-4. Run SLAM against a bundled sample clip:
+4. Run SLAM against the bundled 10-second sample clip:
    ```bash
    DYLD_FALLBACK_LIBRARY_PATH="$PWD/lib/macosx:$DYLD_FALLBACK_LIBRARY_PATH" \
-   HEADLESS=1 /opt/homebrew/bin/python3 slam.py videos/test_road.mp4
+   HEADLESS=1 /opt/homebrew/bin/python3 slam.py videos/road.mp4
    ```
    Remove `HEADLESS=1` to open the Pangolin visualizer.
 

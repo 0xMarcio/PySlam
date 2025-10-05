@@ -1,5 +1,57 @@
+import ctypes
+import sys
+from pathlib import Path
+
 import pygame
 from pygame.locals import DOUBLEBUF
+
+
+def _preload_pangolin_deps():
+    """Ensure Pangolin's shared libraries are available before importing."""
+    if sys.platform != "darwin":
+        return
+
+    repo_root = Path(__file__).resolve().parent
+    lib_root = repo_root / "lib" / "macosx"
+    if not lib_root.exists():
+        return
+
+    # Load auxiliary dependencies first.
+    for name in ("libtinyobj.dylib", "libtinyobj.0.dylib"):
+        dep = lib_root / name
+        if dep.exists():
+            ctypes.CDLL(str(dep))
+
+    def _canonical_name(path: Path) -> str:
+        stem = path.name.split('.dylib')[0]
+        if '.0.' in stem:
+            return stem.split('.0.')[0]
+        if stem.endswith('.0'):
+            return stem[:-2]
+        return stem
+
+    def _priority(path: Path) -> int:
+        name = path.name
+        if name.endswith('.0.dylib'):
+            return 0
+        if name.count('.') == 1:  # plain .dylib
+            return 1
+        return 2  # fully versioned (e.g. .0.9.3)
+
+    groups = {}
+    for lib_path in lib_root.glob("libpango_*.dylib"):
+        groups.setdefault(_canonical_name(lib_path), []).append(lib_path)
+
+    # Preload Pangolin component libraries so @rpath lookups succeed.
+    selected = [min(paths, key=_priority) for paths in groups.values()]
+    for lib_path in sorted(selected):
+        try:
+            ctypes.CDLL(str(lib_path))
+        except OSError as exc:
+            raise ImportError(f"Failed to load Pangolin dependency: {lib_path}\n{exc}") from exc
+
+
+_preload_pangolin_deps()
 
 
 class Display2D(object):
@@ -7,8 +59,11 @@ class Display2D(object):
         pygame.init()
         self.screen = pygame.display.set_mode((W, H), DOUBLEBUF)
         self.surface = pygame.Surface(self.screen.get_size()).convert()
+        self._alive = True
 
     def paint(self, img):
+        if not self._alive:
+            return
         # junk
         for event in pygame.event.get():
             pass
@@ -22,8 +77,16 @@ class Display2D(object):
         # blit
         pygame.display.flip()
 
+    def close(self):
+        if not self._alive:
+            return
+        pygame.display.quit()
+        pygame.quit()
+        self._alive = False
+
 
 from multiprocessing import Process, Queue
+import queue
 import pypangolin as pangolin
 from OpenGL.GL import *
 import numpy as np
@@ -35,15 +98,35 @@ class Display3D(object):
         self.W = W // 2
         self.H = H // 2
         self.F = F
-        self.q = Queue()
+        self.q = Queue(maxsize=5)
         self.vp = Process(target=self.viewer_thread, args=(self.q,))
         self.vp.daemon = True
         self.vp.start()
+        self.max_points = 5000
 
     def viewer_thread(self, q):
         self.viewer_init(self.W, self.H)
-        while True:
-            self.viewer_refresh(q)
+        running = True
+        while running:
+            try:
+                while True:
+                    state = q.get_nowait()
+                    if state is None:
+                        running = False
+                        break
+                    self.state = state
+            except queue.Empty:
+                pass
+
+            if not running:
+                break
+
+            self._render()
+
+        try:
+            pangolin.DestroyWindowAndBind('Map Viewer')
+        except Exception:
+            pass
 
     def viewer_init(self, w, h):
         pangolin.CreateWindowAndBind('Map Viewer', w, h)
@@ -98,10 +181,7 @@ class Display3D(object):
             glVertex3f(*p)
         glEnd()
 
-    def viewer_refresh(self, q):
-        while not q.empty():
-            self.state = q.get()
-
+    def _render(self):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glClearColor(0.0, 0.0, 0.0, 1.0)
         self.dcam.Activate(self.scam)
@@ -112,6 +192,15 @@ class Display3D(object):
                 glColor3f(0.0, 1.0, 0.0)
                 for pose in self.state[0][:-1]:
                     self.draw_camera(pose)
+
+                # draw trajectory polyline
+                glColor3f(0.2, 0.8, 1.0)
+                glLineWidth(2.0)
+                glBegin(GL_LINE_STRIP)
+                for pose in self.state[0]:
+                    center = pose[:3, 3]
+                    glVertex3f(center[0], center[1], center[2])
+                glEnd()
 
             if len(self.state[0]) >= 1:
                 # draw current pose as yellow
@@ -136,4 +225,27 @@ class Display3D(object):
         for p in mapp.points:
             pts.append(p.pt)
             colors.append(p.color)
-        self.q.put((np.array(poses), np.array(pts), np.array(colors) / 256.0))
+        pts_arr = np.array(pts)
+        colors_arr = np.array(colors)
+        if len(pts_arr) > self.max_points:
+            idx = np.linspace(0, len(pts_arr) - 1, self.max_points).astype(int)
+            pts_arr = pts_arr[idx]
+            colors_arr = colors_arr[idx]
+
+        try:
+            self.q.put_nowait((np.array(poses), pts_arr, colors_arr / 256.0))
+        except queue.Full:
+            pass
+
+    def close(self):
+        if self.q is None:
+            return
+        try:
+            self.q.put_nowait(None)
+        except Exception:
+            pass
+        self.vp.join(timeout=1.0)
+        if self.vp.is_alive():
+            self.vp.terminate()
+        self.q.close()
+        self.q = None

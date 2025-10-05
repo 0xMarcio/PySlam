@@ -9,7 +9,7 @@
 ## Build, Test, and Development Commands
 - Install Python dependencies via the system interpreter: `/opt/homebrew/bin/python3 -m pip install --break-system-packages -r requirements.txt`.
 - Rebuild Pangolin and g2o only when you need new binaries—follow `INSTALL.md` and commit updated shared libraries under `lib/macosx/`.
-- Run SLAM on a sample clip: `DYLD_FALLBACK_LIBRARY_PATH="$PWD/lib/macosx:$DYLD_FALLBACK_LIBRARY_PATH" /opt/homebrew/bin/python3 slam.py videos/test_road.mp4`; pass a ground-truth pose file as a second argument to overlay evaluation.
+- Run SLAM on the bundled sample clip: `DYLD_FALLBACK_LIBRARY_PATH="$PWD/lib/macosx:$DYLD_FALLBACK_LIBRARY_PATH" /opt/homebrew/bin/python3 slam.py videos/road.mp4`; pass a ground-truth pose file as a second argument to overlay evaluation.
 - Convert KITTI/TUM truth data: `/opt/homebrew/bin/python3 tools/parse_ground_truth.py <input.txt> videos/groundtruth/<name>.npz`.
 
 ## Coding Style & Naming Conventions
