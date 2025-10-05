@@ -1,16 +1,81 @@
 #!/usr/bin/env python3
 import os
 import sys
+from pathlib import Path
+import ctypes
 
-sys.path.append("lib/macosx")
-sys.path.append("lib/linux")
-sys.path.append("/opt/homebrew/bin")
+REPO_ROOT = Path(__file__).resolve().parent
+
+if sys.platform == "darwin":
+  lib_dir = REPO_ROOT / "lib" / "macosx"
+  sys.path.append(lib_dir.as_posix())
+  lib_str = str(lib_dir)
+
+  def _prepend_path(var: str) -> None:
+    existing = os.environ.get(var, "")
+    parts = [p for p in existing.split(":") if p]
+    if lib_str not in parts:
+      parts.insert(0, lib_str)
+      os.environ[var] = ":".join(parts)
+
+  _prepend_path("DYLD_FALLBACK_LIBRARY_PATH")
+  _prepend_path("DYLD_LIBRARY_PATH")
+else:
+  lib_dir = REPO_ROOT / "lib" / "linux"
+  sys.path.append(lib_dir.as_posix())
 import time
 import cv2
 from display import Display2D, Display3D
 from frame import Frame, match_frames
 import numpy as np
-# import g2o
+
+
+def _preload_native_deps():
+  if sys.platform != "darwin":
+    return
+
+  ordered = [
+    "libg2o_stuff",
+    "libg2o_core",
+    "libg2o_opengl_helper",
+    "libg2o_ext_freeglut_minimal",
+    "libg2o_types_slam2d",
+    "libg2o_types_slam2d_addons",
+    "libg2o_types_sclam2d",
+    "libg2o_types_slam3d",
+    "libg2o_types_slam3d_addons",
+    "libg2o_types_sba",
+    "libg2o_types_sim3",
+    "libg2o_types_icp",
+    "libg2o_types_data",
+    "libg2o_solver_cholmod",
+    "libg2o_solver_csparse",
+    "libg2o_solver_dense",
+    "libg2o_solver_eigen",
+    "libg2o_solver_pcg",
+    "libg2o_solver_slam2d_linear",
+    "libg2o_solver_structure_only",
+    "libg2o_contrib",
+  ]
+
+  loaded = set()
+  for name in ordered:
+    path = lib_dir / f"{name}.dylib"
+    if not path.exists():
+      continue
+    ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
+    loaded.add(path.stem)
+
+  # Load any remaining extension libs to ensure full coverage.
+  for extra in sorted(lib_dir.glob("libg2o_*.dylib")):
+    if extra.stem in loaded:
+      continue
+    ctypes.CDLL(str(extra), mode=ctypes.RTLD_GLOBAL)
+    loaded.add(extra.stem)
+
+
+_preload_native_deps()
+
 from pointmap import Map, Point
 from helpers import triangulate, poseRt
 
@@ -265,7 +330,6 @@ if __name__ == "__main__":
 
   # camera intrinsics
   K = np.array([[F,0,W//2],[0,F,H//2],[0,0,1]])
-  Kinv = np.linalg.inv(K)
 
   # create 2-D display
   if os.getenv("HEADLESS") is None:
@@ -286,8 +350,6 @@ if __name__ == "__main__":
     # add scale param?
     gt_pose[:, :3, 3] *= 50
 
-  debug_exceptions = os.getenv("PYSLAM_DEBUG") == "1"
-
   i = 0
   while cap.isOpened():
     ret, frame = cap.read()
@@ -296,12 +358,7 @@ if __name__ == "__main__":
     frame = cv2.resize(frame, (W, H))
 
     print("\n*** frame %d/%d ***" % (i, CNT))
-    try:
-      slam.process_frame(frame, None if gt_pose is None else np.linalg.inv(gt_pose[i]))
-    except Exception as e:
-      if debug_exceptions:
-        raise
-      print(f'Caught exception: {e}')
+    slam.process_frame(frame, None if gt_pose is None else np.linalg.inv(gt_pose[i]))
 
     disp3d.paint(slam.mapp)
 

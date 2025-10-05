@@ -1,4 +1,5 @@
 import ctypes
+import os
 import sys
 from pathlib import Path
 
@@ -16,11 +17,22 @@ def _preload_pangolin_deps():
     if not lib_root.exists():
         return
 
+    def _ensure_env_path(var: str, path: Path) -> None:
+        existing = os.environ.get(var, "")
+        parts = [p for p in existing.split(":") if p]
+        path_str = str(path)
+        if path_str not in parts:
+            parts.insert(0, path_str)
+            os.environ[var] = ":".join(parts)
+
+    # Make the bundled folder visible to dyld without requiring shell overrides.
+    _ensure_env_path("DYLD_FALLBACK_LIBRARY_PATH", lib_root)
+
     # Load auxiliary dependencies first.
     for name in ("libtinyobj.dylib", "libtinyobj.0.dylib"):
         dep = lib_root / name
         if dep.exists():
-            ctypes.CDLL(str(dep))
+            ctypes.CDLL(str(dep), mode=ctypes.RTLD_GLOBAL)
 
     def _canonical_name(path: Path) -> str:
         stem = path.name.split('.dylib')[0]
@@ -42,11 +54,35 @@ def _preload_pangolin_deps():
     for lib_path in lib_root.glob("libpango_*.dylib"):
         groups.setdefault(_canonical_name(lib_path), []).append(lib_path)
 
-    # Preload Pangolin component libraries so @rpath lookups succeed.
-    selected = [min(paths, key=_priority) for paths in groups.values()]
-    for lib_path in sorted(selected):
+    # Load Pangolin components in a dependency-friendly order.
+    preferred = [
+        "libpango_core",
+        "libpango_vars",
+        "libpango_image",
+        "libpango_geometry",
+        "libpango_opengl",
+        "libpango_glgeometry",
+        "libpango_windowing",
+        "libpango_display",
+        "libpango_scene",
+        "libpango_plot",
+        "libpango_packetstream",
+        "libpango_video",
+        "libpango_tools",
+        "libpango_python",
+    ]
+
+    selected = []
+    for key in preferred:
+        if key in groups:
+            selected.append(min(groups[key], key=_priority))
+    for key, paths in groups.items():
+        if key not in preferred:
+            selected.append(min(paths, key=_priority))
+
+    for lib_path in selected:
         try:
-            ctypes.CDLL(str(lib_path))
+            ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
         except OSError as exc:
             raise ImportError(f"Failed to load Pangolin dependency: {lib_path}\n{exc}") from exc
 
